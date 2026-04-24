@@ -1,0 +1,4 @@
+Sub RunIt()
+    Dim obj As New ThisWorkbook1   ' Class ?? object ????
+    obj.FetchDSEClosingPrice            ' Call ???
+End Sub

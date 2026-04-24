@@ -1,0 +1,357 @@
+VERSION 1.0 CLASS
+BEGIN
+  MultiUse = -1  'True
+END
+Attribute VB_Name = "ThisWorkbook"
+Attribute VB_GlobalNameSpace = False
+Attribute VB_Creatable = False
+Attribute VB_PredeclaredId = True
+Attribute VB_Exposed = True
+Private Sub Workbook_Open()
+    Call FetchDSEClosingPrice
+End Sub
+Sub FetchDSEClosingPrice()
+    
+    Dim http As Object
+    Dim ws As Worksheet
+    Dim i As Long, j As Long
+    Dim dataRowCount As Long
+    Dim gainers As Long, losers As Long, unchanged As Long
+    Dim htmlContent As String
+    
+    gainers = 0: losers = 0: unchanged = 0
+    dataRowCount = 0
+    
+    On Error Resume Next
+    Set ws = ThisWorkbook.Sheets("DSE Closing Price")
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Sheets.Add
+        ws.Name = "DSE Closing Price"
+    End If
+    On Error GoTo 0
+    
+    ws.Cells.Clear
+    Application.StatusBar = "DSE data fetch ??? ?????..."
+    Application.ScreenUpdating = False
+    
+    Set http = CreateObject("MSXML2.XMLHTTP")
+    http.Open "GET", "https://www.dsebd.org/dse_close_price.php", False
+    http.setRequestHeader "User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    http.setRequestHeader "Accept", "text/html,application/xhtml+xml"
+    http.Send
+    
+    If http.Status <> 200 Then
+        MsgBox "Website ???? data ??? ????? ?????! Status: " & http.Status, vbCritical
+        Application.StatusBar = False
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+    
+    htmlContent = http.responseText
+    
+    ' Page-? ???? shares-table ???
+    ' ??????? date selector form, ?????????? actual data
+    ' ??? ???????? shares-table ?????? ???
+    
+    Dim firstPos As Long
+    Dim secondPos As Long
+    Dim tableStart As Long
+    Dim tableEnd As Long
+    
+    firstPos = InStr(1, htmlContent, "shares-table", vbTextCompare)
+    
+    If firstPos = 0 Then
+        MsgBox "Table ?????? ??????!", vbCritical
+        Application.StatusBar = False
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+    
+    ' ???????? shares-table ?????
+    secondPos = InStr(firstPos + 1, htmlContent, "shares-table", vbTextCompare)
+    
+    If secondPos = 0 Then
+        ' ??? ?????????? ?? ?????? ???? ????? ???????? ??????? ???
+        secondPos = firstPos
+    End If
+    
+    ' secondPos ???? ????? ????? <table ?????
+    Dim searchBack As Long
+    searchBack = secondPos
+    tableStart = 0
+    
+    Do While searchBack > 1
+        If Mid(htmlContent, searchBack, 6) = "<table" Then
+            tableStart = searchBack
+            Exit Do
+        End If
+        searchBack = searchBack - 1
+    Loop
+    
+    If tableStart = 0 Then
+        MsgBox "Table ???? ?????? ??????!", vbCritical
+        Application.StatusBar = False
+        Application.ScreenUpdating = True
+        Exit Sub
+    End If
+    
+    ' </table> ?????
+    tableEnd = InStr(tableStart, htmlContent, "</table>", vbTextCompare)
+    If tableEnd = 0 Then tableEnd = Len(htmlContent)
+    
+    Dim tableHTML As String
+    tableHTML = Mid(htmlContent, tableStart, tableEnd - tableStart + 8)
+    
+    ' ---- Headers ----
+    With ws.Range("A1:F1")
+        .Merge
+        .Value = "DSE (Dhaka Stock Exchange) — Closing Price"
+        .Font.Bold = True
+        .Font.Size = 14
+        .Font.Color = RGB(255, 255, 255)
+        .Interior.Color = RGB(31, 78, 121)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .RowHeight = 28
+    End With
+    
+    With ws.Range("A2:F2")
+        .Merge
+        .Value = "Last Updated: " & Format(Now, "dd-mmm-yyyy hh:mm AM/PM") & "  |  Source: dsebd.org"
+        .Font.Size = 9
+        .Font.Italic = True
+        .Font.Color = RGB(89, 89, 89)
+        .HorizontalAlignment = xlCenter
+    End With
+    
+    Dim headers As Variant
+    headers = Array("#", "Trading Code", "Close Price (CLOSEP*)", "Prev Close (YCP*)", "Change", "Change %")
+    Dim colWidths As Variant
+    colWidths = Array(6, 18, 22, 22, 14, 14)
+    
+    For j = 0 To 5
+        With ws.Cells(3, j + 1)
+            .Value = headers(j)
+            .Font.Bold = True
+            .Font.Size = 10
+            .Font.Color = RGB(255, 255, 255)
+            .Interior.Color = RGB(46, 117, 182)
+            .HorizontalAlignment = xlCenter
+            .VerticalAlignment = xlCenter
+        End With
+        ws.Columns(j + 1).ColumnWidth = colWidths(j)
+    Next j
+    ws.Rows(3).RowHeight = 20
+    
+    ' ---- Data Parse ----
+    i = 4
+    Dim pos As Long
+    Dim trStart As Long, trEnd As Long
+    pos = 1
+    
+    Do
+        trStart = InStr(pos, tableHTML, "<tr", vbTextCompare)
+        If trStart = 0 Then Exit Do
+        
+        trEnd = InStr(trStart, tableHTML, "</tr>", vbTextCompare)
+        If trEnd = 0 Then Exit Do
+        
+        Dim trHTML As String
+        trHTML = Mid(tableHTML, trStart, trEnd - trStart + 5)
+        
+        ' <th> row skip ???
+        If InStr(trHTML, "<th") = 0 Then
+            Dim tdValues() As String
+            ReDim tdValues(0 To 10)
+            Dim tdCount As Integer
+            tdCount = 0
+            
+            Dim tdPos As Long
+            tdPos = 1
+            
+            Do
+                Dim tdStart As Long, tdEnd As Long
+                tdStart = InStr(tdPos, trHTML, "<td", vbTextCompare)
+                If tdStart = 0 Then Exit Do
+                
+                Dim tdClose As Long
+                tdClose = InStr(tdStart, trHTML, ">")
+                If tdClose = 0 Then Exit Do
+                
+                tdEnd = InStr(tdClose, trHTML, "</td>", vbTextCompare)
+                If tdEnd = 0 Then Exit Do
+                
+                Dim tdRaw As String
+                tdRaw = Mid(trHTML, tdClose + 1, tdEnd - tdClose - 1)
+                tdRaw = RemoveHTMLTags(tdRaw)
+                tdRaw = Replace(tdRaw, "&amp;", "&")
+                tdRaw = Replace(tdRaw, "&nbsp;", " ")
+                tdRaw = Trim(tdRaw)
+                
+                ' Multiple spaces/newlines ????
+                Do While InStr(tdRaw, "  ") > 0
+                    tdRaw = Replace(tdRaw, "  ", " ")
+                Loop
+                tdRaw = Trim(tdRaw)
+                
+                If tdCount <= UBound(tdValues) Then
+                    tdValues(tdCount) = tdRaw
+                End If
+                tdCount = tdCount + 1
+                tdPos = tdEnd + 5
+            Loop
+            
+            If tdCount >= 4 Then
+                Dim numStr As String
+                Dim codeStr As String
+                Dim closepStr As String
+                Dim ycpStr As String
+                
+                numStr = Trim(tdValues(0))
+                codeStr = Trim(tdValues(1))
+                closepStr = Replace(Trim(tdValues(2)), ",", "")
+                ycpStr = Replace(Trim(tdValues(3)), ",", "")
+                
+                If IsNumeric(closepStr) And IsNumeric(ycpStr) And IsNumeric(numStr) Then
+                    Dim closeP As Double
+                    Dim ycp As Double
+                    Dim chg As Double
+                    Dim chgPct As Double
+                    
+                    closeP = CDbl(closepStr)
+                    ycp = CDbl(ycpStr)
+                    chg = closeP - ycp
+                    chgPct = IIf(ycp <> 0, chg / ycp, 0)
+                    
+                    ws.Cells(i, 1).Value = CLng(numStr)
+                    ws.Cells(i, 2).Value = codeStr
+                    ws.Cells(i, 3).Value = closeP
+                    ws.Cells(i, 4).Value = ycp
+                    ws.Cells(i, 5).Value = chg
+                    ws.Cells(i, 6).Value = chgPct
+                    
+                    ws.Cells(i, 3).NumberFormat = "#,##0.00"
+                    ws.Cells(i, 4).NumberFormat = "#,##0.00"
+                    ws.Cells(i, 5).NumberFormat = "+#,##0.00;-#,##0.00;0.00"
+                    ws.Cells(i, 6).NumberFormat = "+0.00%;-0.00%;0.00%"
+                    
+                    ws.Cells(i, 1).HorizontalAlignment = xlCenter
+                    ws.Cells(i, 2).HorizontalAlignment = xlLeft
+                    ws.Cells(i, 3).HorizontalAlignment = xlRight
+                    ws.Cells(i, 4).HorizontalAlignment = xlRight
+                    ws.Cells(i, 5).HorizontalAlignment = xlRight
+                    ws.Cells(i, 6).HorizontalAlignment = xlRight
+                    
+                    Dim rowRange As Range
+                    Set rowRange = ws.Range(ws.Cells(i, 1), ws.Cells(i, 6))
+                    rowRange.Font.Name = "Arial"
+                    rowRange.Font.Size = 9
+                    rowRange.Borders.LineStyle = xlContinuous
+                    rowRange.Borders.Color = RGB(191, 191, 191)
+                    rowRange.Borders.Weight = xlThin
+                    
+                    If chg > 0 Then
+                        rowRange.Interior.Color = RGB(226, 239, 218)
+                        ws.Cells(i, 5).Font.Color = RGB(55, 86, 35)
+                        ws.Cells(i, 6).Font.Color = RGB(55, 86, 35)
+                        gainers = gainers + 1
+                    ElseIf chg < 0 Then
+                        rowRange.Interior.Color = RGB(252, 228, 214)
+                        ws.Cells(i, 5).Font.Color = RGB(156, 0, 6)
+                        ws.Cells(i, 6).Font.Color = RGB(156, 0, 6)
+                        losers = losers + 1
+                    Else
+                        rowRange.Interior.Color = IIf(dataRowCount Mod 2 = 0, RGB(242, 242, 242), RGB(255, 255, 255))
+                        unchanged = unchanged + 1
+                    End If
+                    
+                    i = i + 1
+                    dataRowCount = dataRowCount + 1
+                End If
+            End If
+        End If
+        
+        pos = trEnd + 5
+    Loop
+    
+    ' Summary row
+    Dim sumRow As Long
+    sumRow = i + 1
+    
+    With ws.Range(ws.Cells(sumRow, 1), ws.Cells(sumRow, 2))
+        .Merge
+        .Value = "Total: " & dataRowCount & " securities"
+        .Font.Bold = True
+        .Font.Size = 9
+        .Font.Name = "Arial"
+        .Interior.Color = RGB(217, 225, 242)
+        .HorizontalAlignment = xlCenter
+    End With
+    
+    With ws.Cells(sumRow, 3)
+        .Value = "Gainers: " & gainers
+        .Font.Bold = True
+        .Font.Color = RGB(55, 86, 35)
+        .Font.Name = "Arial"
+        .Font.Size = 9
+        .Interior.Color = RGB(217, 225, 242)
+    End With
+    
+    With ws.Cells(sumRow, 4)
+        .Value = "Losers: " & losers
+        .Font.Bold = True
+        .Font.Color = RGB(156, 0, 6)
+        .Font.Name = "Arial"
+        .Font.Size = 9
+        .Interior.Color = RGB(217, 225, 242)
+    End With
+    
+    With ws.Cells(sumRow, 5)
+        .Value = "Unchanged: " & unchanged
+        .Font.Bold = True
+        .Font.Color = RGB(64, 64, 64)
+        .Font.Name = "Arial"
+        .Font.Size = 9
+        .Interior.Color = RGB(217, 225, 242)
+    End With
+    
+    ws.Activate
+    ws.Range("A4").Select
+    ActiveWindow.FreezePanes = True
+    
+    Application.StatusBar = False
+    Application.ScreenUpdating = True
+    
+    If dataRowCount = 0 Then
+        MsgBox "The data could not be parsed. The HTML structure may have changed.", vbExclamation
+    Else
+        MsgBox "Successfully fetched data for " & dataRowCount & " securities!" & vbCrLf & _
+                "Gainers: " & gainers & " | Losers: " & losers & " | Unchanged: " & unchanged, _
+                vbInformation, "DSE Data Fetch Completed"
+    End If
+
+End Sub
+
+Function RemoveHTMLTags(htmlStr As String) As String
+    Dim result As String
+    Dim inTag As Boolean
+    Dim c As String
+    Dim k As Long
+    
+    result = ""
+    inTag = False
+    
+    For k = 1 To Len(htmlStr)
+        c = Mid(htmlStr, k, 1)
+        If c = "<" Then
+            inTag = True
+        ElseIf c = ">" Then
+            inTag = False
+        ElseIf Not inTag Then
+            result = result & c
+        End If
+    Next k
+    
+    RemoveHTMLTags = result
+End Function
+
